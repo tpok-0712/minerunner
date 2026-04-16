@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Mind Runner: AI Edition [DEBUGGED]</title>
+    <style>
+        body { text-align: center; font-family: 'Segoe UI', Tahoma, sans-serif; background: #050505; color: #eee; margin: 0; padding: 20px; overflow-x: hidden; }
+        #game-container { display: flex; flex-direction: column; align-items: center; gap: 15px; }
+        canvas { border: 2px solid #00f2ff; background: #080808; box-shadow: 0 0 20px rgba(0, 242, 255, 0.1); cursor: pointer; border-radius: 4px; }
+        .controls { background: #111; padding: 20px; border-radius: 12px; width: 620px; text-align: left; border: 1px solid #333; }
+        .status-line { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #222; padding-bottom: 10px; }
+        .ap-pip { display: inline-block; width: 14px; height: 14px; background: #222; border-radius: 50%; border: 1px solid #444; margin-left: 4px; }
+        .ap-pip.active { background: #ffeb3b; box-shadow: 0 0 10px #ffeb3b; }
+        .ap-pip.saved { background: #ff9800; box-shadow: 0 0 10px #ff9800; }
+        .detector { color: #00ff00; font-weight: bold; background: #0a200a; padding: 4px 12px; border-radius: 20px; border: 1px solid #00ff00; text-shadow: 0 0 5px #00ff00; }
+        .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        button { background: #222; color: #eee; border: 1px solid #444; padding: 10px 18px; cursor: pointer; font-family: inherit; border-radius: 6px; transition: all 0.2s; font-weight: 600; }
+        button:hover { background: #333; border-color: #666; transform: translateY(-1px); }
+        button.active { background: #00f2ff; color: #000; border-color: #fff; box-shadow: 0 0 15px rgba(0, 242, 255, 0.5); }
+        button:disabled { opacity: 0.2; cursor: not-allowed; }
+        #event-log { font-size: 0.9em; color: #888; margin-top: 15px; padding: 10px; background: #000; border-radius: 4px; height: 1.2em; border-left: 3px solid #444; padding-left: 10px; }
+    </style>
+</head>
+<body>
+    <h1>MIND RUNNER: CYBER SWEEPER [DEBUG]</h1>
+    <div id="game-container">
+        <canvas id="gameBoard" width="600" height="600"></canvas>
+        <div class="controls">
+            <div class="status-line">
+                <span id="playerStatus" style="font-weight: bold; font-size: 1.2em;">Player 1 (YOU)</span>
+                <div>AP: <div id="apPips"></div></div>
+                <div class="detector">SCAN: <span id="mineCountDisplay">0</span></div>
+            </div>
+            <div class="button-group">
+                <button id="moveBtn" onclick="setMode('move')">移動 (1AP)</button>
+                <button id="mineBtn" onclick="setMode('mine')">設置 (2AP)</button>
+                <button id="disarmBtn" onclick="setMode('disarm')">解除 (1AP)</button>
+                <button id="skillBtn" class="skill" onclick="activateSkill()">Overclock (3AP)</button>
+                <button id="endTurnBtn" style="margin-left: auto;" onclick="endTurn()">ターン終了</button>
+            </div>
+            <div id="event-log">System Ready... P1 Turn. Navigate carefully.</div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameBoard');
+        const ctx = canvas.getContext('2d');
+        const gridSize = 20;
+        const tileSize = canvas.width / gridSize;
+        const log = document.getElementById('event-log');
+
+        let state = {
+            turn: 1, ap: 4, savedAp: { 1: 0, 2: 0 }, baseAp: 4, maxSave: 2,
+            mode: 'move',
+            p1: { x: 0, y: gridSize-1, color: '#00ffcc', startX: 0, startY: gridSize-1, goalX: gridSize-1, goalY: 0, ocTurns: 0 },
+            p2: { x: gridSize-1, y: 0, color: '#ff0066', startX: gridSize-1, startY: 0, goalX: 0, goalY: gridSize-1, ocTurns: 0 },
+            mines: [], obstacles: [], turnCount: 0, particles: [], isAiThinking: false
+        };
+
+        // 障害物の生成 (25%の確率で壁)
+        for (let i = 0; i < gridSize; i++) {
+            for (let j = 0; j < gridSize; j++) {
+                if (Math.random() < 0.25) {
+                    const isReserved = (i < 2 && j > gridSize-3) || (i > gridSize-3 && j < 2);
+                    if (!isReserved) state.obstacles.push({x: i, y: j});
+                }
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            //背景グリッド描画
+            ctx.strokeStyle = "#1a1a1a";
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= gridSize; i++) {
+                ctx.beginPath(); ctx.moveTo(i * tileSize, 0); ctx.lineTo(i * tileSize, canvas.height); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, i * tileSize); ctx.lineTo(canvas.width, i * tileSize); ctx.stroke();
+            }
+
+            //障害物描画 (サイバークリスタル風)
+            state.obstacles.forEach(o => {
+                ctx.fillStyle = "#151515"; ctx.fillRect(o.x * tileSize + 2, o.y * tileSize + 2, tileSize - 4, tileSize - 4);
+                ctx.strokeStyle = "#333"; ctx.strokeRect(o.x * tileSize + 4, o.y * tileSize + 4, tileSize - 8, tileSize - 8);
+                //中心の輝き
+                ctx.fillStyle = "#222"; ctx.fillRect(o.x * tileSize + tileSize/2 - 2, o.y * tileSize + tileSize/2 - 2, 4, 4);
+            });
+
+            //ゴールエリア (鮮やかなテレポーター風)
+            drawGoal(state.p1.goalX, state.p1.goalY, state.p1.color); drawGoal(state.p2.goalX, state.p2.goalY, state.p2.color);
+            
+            //地雷描画 (設置した瞬間のみ表示)
+            state.mines.forEach(m => {
+                if (m.turnPlaced === state.turnCount && m.owner === state.turn) {
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.3)"; ctx.beginPath(); ctx.arc(m.x * tileSize + tileSize/2, m.y * tileSize + tileSize/2, tileSize/5, 0, Math.PI*2); ctx.fill();
+                }
+            });
+
+            drawPlayer(state.p1); drawPlayer(state.p2);
+            drawParticles();
+            updateUI();
+        }
+
+        function drawPlayer(p) {
+            ctx.fillStyle = p.color; ctx.shadowBlur = 15; ctx.shadowColor = p.color;
+            ctx.fillRect(p.x * tileSize + 6, p.y * tileSize + 6, tileSize - 12, tileSize - 12); ctx.shadowBlur = 0;
+            if (p.ocTurns > 0) { ctx.strokeStyle = "#fff"; ctx.strokeRect(p.x * tileSize + 2, p.y * tileSize + 2, tileSize - 4, tileSize - 4); }
+        }
+
+        function drawGoal(x, y, color) {
+            ctx.fillStyle = "rgba(255, 255, 255, 0.05)"; ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+            ctx.strokeStyle = color; ctx.setLineDash([4, 2]); ctx.strokeRect(x * tileSize + 4, y * tileSize + 4, tileSize - 8, tileSize - 8); ctx.setLineDash([]);
+        }
+
+        function countNearbyMines() {
+            const cp = state[`p${state.turn}`];
+            return state.mines.filter(m => Math.abs(m.x - cp.x) + Math.abs(m.y - cp.y) <= 2).length;
+        }
+
+        function updateUI() {
+            const cp = state[`p${state.turn}`];
+            document.getElementById('playerStatus').innerText = state.turn === 1 ? "Player 1 (YOU)" : "AI THINKING...";
+            document.getElementById('playerStatus').style.color = cp.color;
+            const pips = document.getElementById('apPips'); pips.innerHTML = '';
+            for(let i=0; i < (state.baseAp + state.maxSave); i++) {
+                const pip = document.createElement('div');
+                pip.className = `ap-pip ${i < state.ap ? (i >= state.baseAp ? 'saved' : 'active') : ''}`;
+                pips.appendChild(pip);
+            }
+            document.getElementById('mineCountDisplay').innerText = countNearbyMines();
+            document.getElementById('moveBtn').className = state.mode === 'move' ? 'active' : '';
+            document.getElementById('mineBtn').className = state.mode === 'mine' ? 'active' : '';
+            document.getElementById('disarmBtn').className = state.mode === 'disarm' ? 'active' : '';
+            document.getElementById('skillBtn').disabled = state.ap < 3 || cp.ocTurns > 0;
+        }
+
+        function setMode(m) { if(state.turn === 1) state.mode = m; draw(); }
+
+        function activateSkill() {
+            const cp = state[`p${state.turn}`];
+            if (state.ap >= 3 && cp.ocTurns === 0) { state.ap -= 3; cp.ocTurns = 2; addLog(`P${state.turn} activated OVERCLOCK!`); draw(); }
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (state.turn !== 1 || state.isAiThinking) return;
+            const rect = canvas.getBoundingClientRect();
+            const tx = Math.floor((e.clientX - rect.left) / tileSize);
+            const ty = Math.floor((e.clientY - rect.top) / tileSize);
+            handleAction(tx, ty);
+        });
+
+        function handleAction(tx, ty) {
+            if(state.turn !== 1 && !state.isAiThinking) return; // 不正な操作防止
+            const cp = state[`p${state.turn}`];
+            const moveCost = cp.ocTurns > 0 ? 0.5 : 1;
+            
+            if (state.mode === 'move' && state.ap >= moveCost) {
+                if (Math.abs(tx - cp.x) + Math.abs(ty - cp.y) === 1 && !state.obstacles.some(o => o.x === tx && o.y === ty)) {
+                    cp.x = tx; cp.y = ty; state.ap -= moveCost;
+                    if (checkCollision(tx, ty)) return;
+                }
+            } else if (state.mode === 'mine' && state.ap >= 2) {
+                if (!state.obstacles.some(o => o.x === tx && o.y === ty)) {
+                    state.mines.push({x: tx, y: ty, owner: state.turn, turnPlaced: state.turnCount});
+                    state.ap -= 2; addLog("Mine Deployed.");
+                }
+            } else if (state.mode === 'disarm' && state.ap >= 1) {
+                const mineIdx = state.mines.findIndex(m => m.x === tx && m.y === ty);
+                if (mineIdx !== -1) { state.mines.splice(mineIdx, 1); addLog("Signal Disrupted. Disarmed."); }
+                else addLog("Nothing found.");
+                state.ap -= 1;
+            }
+            draw();
+            if (state.ap <= 0) endTurn();
+        }
+
+        function checkCollision(x, y) {
+            const mineIndex = state.mines.findIndex(m => m.x === x && m.y === y);
+            const cp = state[`p${state.turn}`];
+            if (mineIndex !== -1) {
+                addLog("!! DETONATION !!");
+                createExplosionParticles(x, y, cp.color);
+                cp.x = cp.startX; cp.y = cp.startY; cp.ocTurns = 0;
+                state.mines.splice(mineIndex, 1); state.ap = 0; endTurn(); return true;
+            }
+            if (x === cp.goalX && y === cp.goalY) { alert(state.turn === 1 ? "MISSION COMPLETE: YOU WIN!" : "MISSION FAILED: AI WINS!"); location.reload(); }
+            return false;
+        }
+
+        async function runAITurn() {
+            state.isAiThinking = true;
+            while (state.turn === 2 && state.ap > 0) {
+                await new Promise(r => setTimeout(r, 600)); // AIの思考時間
+                const cp = state.p2;
+                
+                //スキル使用判断
+                if (state.ap >= 3 && cp.ocTurns === 0) { activateSkill(); draw(); continue; }
+
+                //バグ修正：地雷探知ロジックの強化
+                //周囲のスキャン反応を再取得
+                const scanMineCount = countNearbyMines();
+                
+                //スキャン反応があり、かつ解除APがある場合
+                if (scanMineCount > 0 && state.ap >= 1 && Math.random() > 0.4) {
+                    //解除すべき「目の前の地雷」を優先して特定
+                    const disarmTarget = getAIdisarmTarget(cp.x, cp.y);
+                    if (disarmTarget) {
+                        state.mode = 'disarm'; handleAction(disarmTarget.x, disarmTarget.y); continue;
+                    }
+                }
+
+                //移動
+                state.mode = 'move';
+                const nextMove = getNextStepAI(cp.x, cp.y, cp.goalX, cp.goalY);
+                if (nextMove) { handleAction(nextMove.x, nextMove.y); }
+                else { endTurn(); break; } //ルートなし
+            }
+            state.isAiThinking = false;
+        }
+
+        //AI用：探知範囲内(距離2)にある解除候補の地雷を特定
+        function getAIdisarmTarget(sx, sy) {
+            const targets = state.mines.filter(m => Math.abs(m.x - sx) + Math.abs(m.y - sy) <= 2);
+            if (targets.length === 0) return null;
+            //最も近いものを解除。なければランダムに1つ。
+            return targets.sort((a,b) => (Math.abs(a.x - sx) + Math.abs(a.y - sy)) - (Math.abs(b.x - sx) + Math.abs(b.y - sy)))[0];
+        }
+
+        function getNextStepAI(sx, sy, gx, gy) {
+            const dirs = [{x:1, y:0}, {x:-1, y:0}, {x:0, y:1}, {x:0, y:-1}];
+            const path = dirs
+                .map(d => ({x: sx + d.x, y: sy + d.y}))
+                .filter(p => p.x >= 0 && p.x < gridSize && p.y >= 0 && p.y < gridSize && !state.obstacles.some(o => o.x === p.x && o.y === p.y))
+                .sort((a, b) => (Math.abs(a.x - gx) + Math.abs(a.y - gy)) - (Math.abs(b.x - gx) + Math.abs(b.y - gy)));
+            return path[0];
+        }
+
+        function endTurn() {
+            const cp = state[`p${state.turn}`];
+            state.savedAp[state.turn] = Math.min(Math.floor(state.ap), state.maxSave);
+            if (cp.ocTurns > 0) cp.ocTurns--;
+            state.turn = state.turn === 1 ? 2 : 1;
+            state.ap = state.baseAp + state.savedAp[state.turn];
+            state.mode = 'move'; state.turnCount++;
+            draw();
+            if (state.turn === 2) runAITurn();
+        }
+
+        function createExplosionParticles(x, y, color) {
+            for (let i = 0; i < 40; i++) state.particles.push({ x: x * tileSize + tileSize/2, y: y * tileSize + tileSize/2, vx: (Math.random()-0.5)*12, vy: (Math.random()-0.5)*12, life: 40 + Math.random()*20, color: color });
+        }
+        function drawParticles() {
+            if (state.particles.length === 0) return;
+            state.particles.forEach((p, i) => {
+                p.x += p.vx; p.y += p.vy; p.vx *= 0.98; p.vy *= 0.98; p.life--;
+                if (p.life <= 0) { state.particles.splice(i, 1); return; }
+                ctx.fillStyle = p.color; ctx.globalAlpha = p.life / 60; ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI*2); ctx.fill();
+            });
+            ctx.globalAlpha = 1; requestAnimationFrame(draw);
+        }
+        function addLog(m) { log.innerText = m; }
+        draw();
+    </script>
+</body>
+</html>
